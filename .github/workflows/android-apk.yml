@@ -1,0 +1,101 @@
+# Build the Bayti TV launcher APK for Thomson Android TV (Android 11).
+#
+# HOW TO USE
+# 1. Push this whole project to a GitHub repo (public or private).
+# 2. GitHub → Actions tab → enable workflows.
+# 3. Run "Build Android TV APK" manually (workflow_dispatch) OR push to main.
+# 4. When it finishes, open the run → Artifacts → download `bayti-tv-apk`.
+#    Inside you will find `app-debug.apk` — sideload it on the Thomson TV
+#    (USB stick + a file manager, or `adb install app-debug.apk`).
+#
+# The APK loads your live Lovable URL configured in `capacitor.config.ts`,
+# so changes you make in Lovable Admin appear on the TV immediately —
+# no need to rebuild the APK for content changes.
+
+name: Build Android TV APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "capacitor.config.ts"
+      - "android-overrides/**"
+      - ".github/workflows/android-apk.yml"
+      - "src/**"
+      - "package.json"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Capacitor (CLI + Android platform)
+        run: |
+          bun add -d @capacitor/cli@latest
+          bun add @capacitor/core@latest @capacitor/android@latest @capacitor/app-launcher@latest
+
+      - name: Build web bundle
+        run: bun run build
+        env:
+          NODE_ENV: production
+
+      # Capacitor expects the web bundle under `webDir` (dist).
+      # TanStack Start emits to .output/public — copy it where Capacitor looks.
+      - name: Prepare webDir for Capacitor
+        run: |
+          rm -rf dist-tmp
+          if [ -d ".output/public" ]; then
+            cp -r .output/public dist-tmp
+          elif [ -d "dist/client" ]; then
+            cp -r dist/client dist-tmp
+          else
+            mkdir -p dist-tmp
+          fi
+          rm -rf dist
+          mv dist-tmp dist
+          # Capacitor refuses to start if dist/index.html is missing.
+          # Since the WebView loads server.url, a stub is enough.
+          test -f dist/index.html || echo '<!doctype html><meta http-equiv="refresh" content="0;url=/" />' > dist/index.html
+
+      - name: Add Android platform
+        run: npx cap add android || npx cap sync android
+
+      - name: Apply Bayti TV manifest (Leanback + HOME launcher)
+        run: |
+          cp android-overrides/app/src/main/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          npx cap sync android
+
+      - name: Build debug APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bayti-tv-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
